@@ -1,20 +1,30 @@
 "use client";
+
+declare const ManagedMediaSource: typeof MediaSource | undefined;
+
 import { useEffect, useRef, useState, useCallback } from "react";
 import Hls from "hls.js";
 
-// hls.js v1.x sometimes reports AAC audio as object type 1 (Main profile,
-// `mp4a.40.1`) when the actual ADTS frames are object type 2 (LC). Chrome
-// and Firefox do not support AAC Main playback, so MediaSource rejects the
-// codec with `bufferAddCodecError`. Rewriting the MIME at the MSE boundary
-// is the standard production workaround — the decoded audio bytes are
-// fine, only the advertised codec string is wrong.
+// Mobile browsers' MSE implementations reject codecs that the device can
+// decode natively. Common offenders: mp4a.40.1 (AAC Main), mp4a.40.5
+// (HE-AAC/SBR), mp4a.40.29 (HE-AACv2/PS). Rewriting all of these to
+// mp4a.40.2 (AAC-LC) at the MSE boundary is the standard workaround —
+// the decoded audio bytes are fine, only the advertised codec string is
+// wrong.
 let mediaSourcePatched = false;
 function patchMediaSourceCodecs() {
-  if (mediaSourcePatched || typeof MediaSource === "undefined") return;
-  const orig = MediaSource.prototype.addSourceBuffer;
-  MediaSource.prototype.addSourceBuffer = function (type: string) {
-    if (typeof type === "string" && /mp4a\.40\.1\b/.test(type)) {
-      const rewritten = type.replace(/mp4a\.40\.1\b/g, "mp4a.40.2");
+  if (mediaSourcePatched) return;
+  const MSE =
+    typeof MediaSource !== "undefined"
+      ? MediaSource
+      : typeof ManagedMediaSource !== "undefined"
+        ? ManagedMediaSource
+        : null;
+  if (!MSE) return;
+  const orig = MSE.prototype.addSourceBuffer;
+  MSE.prototype.addSourceBuffer = function (type: string) {
+    if (typeof type === "string" && /mp4a\.40\.(?:1|5|29)\b/.test(type)) {
+      const rewritten = type.replace(/mp4a\.40\.(?:1|5|29)\b/g, "mp4a.40.2");
       // eslint-disable-next-line no-console
       console.info("[mse-patch] rewriting codec:", type, "→", rewritten);
       type = rewritten;
@@ -101,19 +111,35 @@ export default function VideoPlayer({
 
     const dev = process.env.NODE_ENV !== "production";
 
-    if (sourceIsM3U8 && Hls.isSupported()) {
+    if (sourceIsM3U8 && video.canPlayType("application/vnd.apple.mpegurl")) {
+      // Native HLS — preferred over hls.js because it bypasses MSE entirely.
+      // The device's native decoder handles all codecs it supports, avoiding
+      // bufferAddCodecError from MSE's stricter codec allowlist (especially
+      // on mobile). Works on Safari (all platforms) and some Android browsers.
+      video.src = sourceUrl;
+      const onMeta = () => {
+        setLoading(false);
+        if (autoPlay) video.play().catch(() => {});
+      };
+      video.addEventListener("loadedmetadata", onMeta);
+      const onError = () => {
+        setLoading(false);
+        setPlayerError("Native HLS playback failed — check console");
+      };
+      video.addEventListener("error", onError);
+      return () => {
+        video.removeEventListener("loadedmetadata", onMeta);
+        video.removeEventListener("error", onError);
+      };
+    } else if (sourceIsM3U8 && Hls.isSupported()) {
       patchMediaSourceCodecs();
       const hls = new Hls({
         maxBufferLength: 10,
         maxMaxBufferLength: 30,
-        debug: dev, // verbose hls.js logging in dev — see browser console
+        debug: dev,
         xhrSetup: (xhr) => {
           xhr.withCredentials = false;
         },
-        // Some streams (notably AnimePahe via kwik) embed a metadata PID
-        // (stream_type 0x15) alongside H.264+AAC. Disabling caption/metadata
-        // tracks reduces the chance hls.js tries to add a SourceBuffer for
-        // them, which on some browsers triggers bufferAddCodecError.
         enableWebVTT: false,
         enableIMSC1: false,
         enableCEA708Captions: false,
@@ -131,14 +157,10 @@ export default function VideoPlayer({
         if (autoPlay) video.play().catch(() => {});
       });
 
-      // Track codec-error retries so we don't loop forever when recovery
-      // can't actually fix a codec/MSE problem.
       let codecRetries = 0;
 
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (dev) {
-          // Dump every enumerable field on the error so we don't miss
-          // mimeType / sourceBufferName / inner error.message.
           const dump: Record<string, unknown> = {};
           for (const k of Object.keys(data) as Array<keyof typeof data>) {
             dump[k as string] = data[k];
@@ -153,8 +175,6 @@ export default function VideoPlayer({
             hls.startLoad();
             return;
           case Hls.ErrorTypes.MEDIA_ERROR: {
-            // bufferAddCodecError can't be fixed by recoverMediaError —
-            // the codec is genuinely rejected by MSE. Don't loop on it.
             const codecRelated =
               data.details === Hls.ErrorDetails.BUFFER_ADD_CODEC_ERROR ||
               data.details === Hls.ErrorDetails.BUFFER_INCOMPATIBLE_CODECS_ERROR;
@@ -183,15 +203,6 @@ export default function VideoPlayer({
         hls.destroy();
         hlsRef.current = null;
       };
-    } else if (sourceIsM3U8 && video.canPlayType("application/vnd.apple.mpegurl")) {
-      // Native HLS (Safari)
-      video.src = sourceUrl;
-      const onMeta = () => {
-        setLoading(false);
-        if (autoPlay) video.play().catch(() => {});
-      };
-      video.addEventListener("loadedmetadata", onMeta);
-      return () => video.removeEventListener("loadedmetadata", onMeta);
     } else {
       // Plain MP4 fallback
       video.src = sourceUrl;
