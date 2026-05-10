@@ -119,7 +119,7 @@ export default function VideoPlayer({
       video.src = sourceUrl;
       const onMeta = () => {
         setLoading(false);
-        if (autoPlay) video.play().catch(() => {});
+        if (autoPlay) video.play().catch(() => setLoading(false));
       };
       video.addEventListener("loadedmetadata", onMeta);
       const onError = () => {
@@ -154,7 +154,7 @@ export default function VideoPlayer({
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         setLoading(false);
-        if (autoPlay) video.play().catch(() => {});
+        if (autoPlay) video.play().catch(() => setLoading(false));
       });
 
       let codecRetries = 0;
@@ -207,7 +207,7 @@ export default function VideoPlayer({
       // Plain MP4 fallback
       video.src = sourceUrl;
       setLoading(false);
-      if (autoPlay) video.play().catch(() => {});
+      if (autoPlay) video.play().catch(() => setLoading(false));
     }
   }, [sourceUrl, sourceIsM3U8, autoPlay]);
 
