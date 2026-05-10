@@ -8,6 +8,7 @@
 // also get the Referer treatment.
 import type { NextRequest } from "next/server";
 
+export const runtime = "edge";
 export const dynamic = "force-dynamic";
 
 const DEFAULT_UA =
